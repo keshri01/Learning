@@ -1,0 +1,148 @@
+import os
+import pandas as pd
+import sys
+from multiprocessing import Queue
+data = pd.read_csv('/Users/balram/Desktop/Routing/Results.csv')
+data = data[['Price / min', 'Destination Prefixes']]
+data.columns= ['rate','prefix']
+def long_matching_prefix_rate(prefix1):
+    global data
+    dataframe_prefix_rate = data
+    df_prefix_list = dataframe_prefix_rate['prefix'].drop_duplicates()
+    df_prefix_list = df_prefix_list.tolist()
+    for j in range(0,16):
+        dummy_prefix = prefix1//(10**j)
+        if dummy_prefix in df_prefix_list:
+            matching_prefix_rate = dataframe_prefix_rate.rate[dataframe_prefix_rate.prefix== dummy_prefix].values
+            if len(matching_prefix_rate) ==1:
+                break
+    return matching_prefix_rate[0]
+
+def round_prices(prefix_list, prefix_map):
+    for prefix in prefix_list:
+        raw_price = float(prefix_map[str(prefix)]['price'])
+        percent_5_val = 0.05 * raw_price
+        n = 0
+        while True:
+            product = percent_5_val * (10 ** n)
+            if product >= 5:
+                break
+            n = n + 1
+        rounded_price = round(raw_price, n)
+        prefix_map[str(prefix)]['rounded_price'] = rounded_price
+        prefix_map[str(prefix)]['n'] = n
+def remove_children(prefix_list, prefix_map):
+    for prefix in prefix_list:
+        len_prefix = len(str(prefix))
+        i = 1
+        while (len_prefix - i) > 0:
+            sub_prefix = str(prefix)[0:(-1*i)]
+            i = i + 1
+            if sub_prefix in prefix_map: # and prefix_map[sub_prefix]['price'] == prefix_map[str(prefix)]['price']:
+                delta = abs(prefix_map[sub_prefix]['rounded_price'] - prefix_map[str(prefix)]['rounded_price'])
+                delta_percent = round((delta / prefix_map[str(prefix)]['rounded_price']) * 100, 0)
+                if delta_percent <= 10:
+                    prefix_map[str(prefix)]['ignore'] = True
+                    prefix_map[str(prefix)]['rolled_up_to'] = str(sub_prefix)
+def process(infile, outfile):
+    prefix_list = []
+    prefix_map = {}
+    with open('../raw_data/' + infile, 'r') as inf:
+        count = 0
+        for line in inf:
+            if count > 0:
+                line = line.strip()
+                if line:
+                    data_dict = line.split(",")
+                    prefix_list.append(data_dict[0])
+                    prefix_map[str(data_dict[0])] = {'price': data_dict[1], 'ignore': False, 'rolled_up_to': '', 'new': False}
+            count = count + 1
+    prefix_list = sorted(prefix_list, key=int, reverse=True)
+    round_prices(prefix_list, prefix_map)
+    remove_children(prefix_list, prefix_map)
+    prefix_queue = Queue()
+    for prefix in prefix_list:
+        prefix_queue.put(prefix)
+    print ("Raw prefixes set: " + str(len(prefix_list)))
+    with open('../processed_data/' + outfile, 'w') as outf:
+        while not prefix_queue.empty():
+            prefix = prefix_queue.get(block = False)
+            if not prefix_map[str(prefix)]['ignore']:
+                price = prefix_map[str(prefix)]['rounded_price']
+                prefix_1 = str(prefix)[:-1]
+                i = 0
+                all_children_exist = True
+                all_children_same_price = True
+                existing_children_map = {}
+                existing_children = []
+                while i <= 9:
+                    child = prefix_1 + str(i) 
+                    if child in prefix_map and prefix_map[child]['rounded_price'] == price:
+                        existing_children.append(child)
+                        existing_children_map[str(child)] = 1
+                    elif child not in prefix_map:
+                        all_children_exist = False
+                    elif prefix_map[child]['rounded_price'] != price:
+                        all_children_same_price = False
+                    i = i + 1
+                if all_children_exist and all_children_same_price:
+                    #all children should be ignored
+                    print ("All siblings of " + str(prefix) + " are present and have same price. Ignoring prefix. Adding parent.")
+                    prefix_map[prefix_1] = {'rounded_price': price, 'price': price, 'ignore': False, 'new': True, 'rolled_up_to': ''}
+                    prefix_queue.put(prefix_1)
+                    i = 0
+                    while i <= 9:
+                        child = prefix_1 + str(i)
+                        prefix_map[child]['ignore'] = True
+                        prefix_map[child]['rolled_up_to'] = prefix_1
+                        i = i + 1
+                elif len(existing_children) > 5:
+                    print ("Majority siblings of " + str(prefix) + " are present and have same price. Ignoring prefix. Adding parent.")
+                    prefix_map[prefix_1] = {'rounded_price': price, 'price': price, 'ignore': False, 'new': True, 'rolled_up_to': ''}
+                    prefix_queue.put(prefix_1)
+                    i = 0
+                    while i <= 9:
+                        child = prefix_1 + str(i) 
+                        if child in existing_children_map:
+                            prefix_map[child]['ignore'] = True
+                            prefix_map[child]['rolled_up_to'] = prefix_1
+                        else:
+                            if child not in prefix_map:
+                                prefix_map[child] = {'rounded_price': price, 'price': price, 'ignore': False, 'new': True, 'rolled_up_to': ''}
+                                prefix_queue.put(child)
+                            elif prefix_map[child]['ignore'] is True:
+                                prefix_map[child]['ignore'] = False
+                                prefix_map[child]['rounded_price'] = price
+                                prefix_map[child]['price'] = price
+                                prefix_map[child]['new'] = False
+                                prefix_map[child]['rolled_up_to'] = ''
+                                prefix_queue.put(child)
+                        i = i + 1
+                else:
+                    print ("Not ignorging " + str(prefix))
+            else:
+                print ("Prefix " + str(prefix) + " marked as ignored.")
+        
+        new_prefix_list = []
+        for prefix in prefix_map:
+            if prefix_map[prefix]['ignore'] is False:
+                new_prefix_list.append(prefix)
+        remove_children(new_prefix_list, prefix_map)
+        for prefix in prefix_map:
+            if prefix_map[prefix]['ignore'] is False:
+                outf.write(prefix + "," + str(prefix_map[prefix]['rounded_price']) + "\n")
+    with open('../processed_data/Dbug/' + outfile + ".dbug.csv", 'w') as outf:
+        outf.write("Prefix" + "," + "Original Price" + "," + "Is Ignored" + "," + "Rounded Price" + "," + "Is Newly Added" + "," + "Rolled Up To" + "\n")
+        for prefix in prefix_map:
+            outf.write(prefix + "," + str(prefix_map[prefix]['price']) + "," + str(prefix_map[prefix]['ignore']) + "," + str(prefix_map[prefix]['rounded_price']) + "," + str(prefix_map[prefix]['new']) + "," + str(prefix_map[prefix]['rolled_up_to']) + "\n")
+file_name = os.listdir("/Users/balram/Desktop/voice-prefix-normalizer/raw_data/") 
+for i in file_name:   
+    if "SP" in i:
+    	process(i, i)
+twilio_comparison_sp_file_name = os.listdir("/Users/balram/Desktop/voice-prefix-normalizer/processed_data/") 
+for i in twilio_comparison_sp_file_name:   
+    if "dbug" not in i and 'SP' in i and 'Twilio_rate' not in i:
+        print(i)
+        file = pd.read_csv('/Users/balram/Desktop/voice-prefix-normalizer/processed_data/'+str(i),header=None,names=['prefix','rate'])
+        file['twilio_rate'] = file['prefix'].apply(long_matching_prefix_rate)
+        file.to_csv('/Users/balram/Desktop/voice-prefix-normalizer/processed_data/Twilio_Comparison/'+str(i)+'Twilio_rate.csv')
