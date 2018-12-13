@@ -1,0 +1,220 @@
+""" Created on Sat Jul 28 14:56:57 2018 @author: balram """
+import pandas as pd
+import psycopg2
+import numpy as np
+Redshift_Username = '*******'
+Redshift_Password = '*********'
+def sql_run(query):
+    #con=psycopg2.connect(dbname= 'edw', host='************************************************', 
+    port= '****', user= Redshift_Username, password= Redshift_Password)
+    cur = con.cursor()
+    print ("Executing Query")
+    cur.execute(query)
+    print ("Execution Compelete")
+    Input = pd.DataFrame(cur.fetchall())
+    Input.columns = ['carrier','carrier_id','Country','prefix','rate']
+    cur.close() 
+    con.close()
+    return Input
+
+def second_smallest(list1):
+    list1 = list1.tolist()
+    list1.sort()
+    return list1[1]
+#cost_price_calculation and delettion of child
+def cpp_del(Input):
+    carrier_id = Input.carrier_id
+    carrier_id = carrier_id.drop_duplicates()
+    carrier_id = carrier_id.tolist() 
+    all_prefix = Input['prefix'].drop_duplicates()
+    all_prefix = all_prefix.sort_values(ascending=True)
+    all_prefix = all_prefix.to_frame()
+    all_prefix = all_prefix.set_index('prefix')
+    Column_name = []
+    Carrier_rate = []
+#concatenate different cost price    
+    for cid_len in range (len(carrier_id)):
+        CID = carrier_id[cid_len]
+        CCG ='Carrier'+str(carrier_id[cid_len])
+        Column_name.append(CCG)
+        vars()[CCG] = Input[['prefix','rate']][Input.carrier_id == CID]
+        vars()[CCG] = vars()[CCG].set_index('prefix')
+        Carrier_rate.append(vars()[CCG])
+    all_prefix = pd.concat(Carrier_rate,axis=1,sort=False)
+    all_prefix.columns = Column_name    
+    List = []
+    for i in Column_name:
+        Train = all_prefix[i]
+        Train = Train.reset_index()
+        Train.columns = ['prefix','rate']
+        Train['prefix'] = Train.prefix.astype(str)
+        already_fill = Train[Train.rate >0]
+        already_fill = already_fill.set_index('prefix')
+        to_fill = Train['prefix'][Train.rate.isna()]
+        to_fill = to_fill.to_frame()
+#to insert missing values
+        for j in range(15):
+            if j >0:
+                to_fill =to_fill.reset_index()
+                to_fill = to_fill['prefix']
+                to_fill = to_fill.to_frame()
+                to_fill['dummy_prefix'] = to_fill['prefix'].str[:-(j+1)]
+                to_fill = to_fill.set_index('dummy_prefix')
+                to_fill = to_fill.join(already_fill,how='left')
+                to_fill = to_fill.set_index('prefix')
+                staging = to_fill[to_fill.rate>0]
+                to_fill = to_fill[to_fill.rate.isna()]
+                frames = [staging,already_fill]
+                already_fill = pd.concat(frames,axis = 0,sort=False)
+                #print(j)
+            else:
+                #print(j)
+                to_fill['dummy_prefix'] = to_fill['prefix'].str[:-(j+1)]
+                to_fill = to_fill.set_index('dummy_prefix')
+                to_fill = to_fill.join(already_fill,how='left')
+                to_fill = to_fill.set_index('prefix')
+                staging = to_fill[to_fill.rate>0]
+                to_fill = to_fill[to_fill.rate.isna()]
+                frames = [staging,already_fill]
+                already_fill = pd.concat(frames,axis = 0,sort=False)
+        already_fill.columns = [i]
+        List.append(already_fill)    
+    Final_rate_Sheet = pd.concat(List,axis = 1)    
+    prefixes = Train.prefix.astype(int)
+    prefixes =prefixes.tolist()
+    prefixes = sorted(prefixes,reverse=True)
+    Deletion_list = []
+#remove duplicates
+    for i in prefixes:
+        #print(i)
+        for j in range(len(str(i))):
+            stage = str(i)
+            compare = str(i//(10**(j+1)))
+            Compare_int = int(compare)
+            if Compare_int in (prefixes):
+                #print(compare)
+                if Final_rate_Sheet.loc[stage].tolist() == Final_rate_Sheet.loc[compare].tolist():
+                    #print(stage,compare)
+                    if i not in Deletion_list: 
+                        Deletion_list.append(i)
+                        #print(stage,compare)
+                        break
+    cp_rate_sheet = Final_rate_Sheet
+    cp_rate_sheet['prefix'] = cp_rate_sheet.index
+    cp_rate_sheet = cp_rate_sheet.astype(float)
+    cp_after_deletion = cp_rate_sheet[~cp_rate_sheet['prefix'].isin(Deletion_list)]
+    cp_after_deletion['prefix'] = cp_after_deletion['prefix'].astype(int)
+    return Deletion_list,cp_rate_sheet,cp_after_deletion,Final_rate_Sheet
+def parent_child_removal(dataframe):
+    dataframe['prefix'] = dataframe.prefix.astype(int)
+    prefix1=dataframe.prefix.drop_duplicates()
+    deletion_list = []
+    prefix1 = prefix1.tolist()
+    for i in prefix1:
+        for j in range(1,16):
+            to_compare = dataframe.rate[dataframe.prefix==i].values
+            if i//(10**j)>0:
+                if i//(10**j) in prefix1: 
+                    compare = dataframe.rate[dataframe.prefix== i//(10**j)].values
+                    if to_compare == compare:
+                        deletion_list.append(i)
+                        #print(i, 'will be ignored because of ',i//(10**j))
+    output = dataframe[~dataframe['prefix'].isin(deletion_list)]  
+    return output
+def parent_child_routing_removal(dataframe):
+    dataframe.index = dataframe.index.astype(str)
+    deletion_list = []
+    for i in dataframe.index:
+        for j in range (len(i)):            
+            if i[:-(j+1)] in dataframe.index and dataframe.loc[i].tolist() == dataframe.loc[i[:-(j+1)]].tolist():
+                deletion_list.append(i)
+    dataframe = dataframe[~dataframe.index.isin(deletion_list)]
+    return dataframe
+def reduce_input(Input_raw):
+    carrier_id = Input_raw['carrier_id'].drop_duplicates()
+    frames = []
+    for i in carrier_id:
+#        carrier = 'carrier'+str(i)
+        Intermediate  = Input_raw[['prefix','rate']][Input_raw.carrier_id == i]
+        Intermediate = parent_child_removal(Intermediate)
+        Intermediate['carrier_id'] = i
+        Intermediate['Country'] = 'dummy'
+        Intermediate['carrier'] = 'dummy'        
+        Intermediate = Intermediate[['carrier', 'carrier_id', 'Country', 'prefix', 'rate']]
+        frames.append(Intermediate)
+    output = pd.concat(frames)
+    return output
+mass_input = pd.read_csv('/Users/balram/Desktop/voice-prefix-normalizer/scripts/Input/call_hippo.csv')
+mass_input = mass_input.reset_index()
+Complete_list=[]
+#for i in range(len(mass_input)):
+for i in range(len(mass_input)):
+    print(i)
+    query_input = mass_input.iloc[i]
+    country = query_input[0]
+    country_selling_price = str(query_input[0])+'selling_price'
+    country_routing = str(query_input[0])+'Routing'
+    Country_prefix = query_input[1]
+    Carrier_cost_group_id = query_input[2]
+    POD = query_input[3]
+    carrier_name = query_input[4]
+    query = """select 'dummy' carrier,carrier_cost_group_id ,'dummy' Country,prefix,round(minimum_cost*60,3) as rate from base.fact_carrier_outgoingcarriervoicecost a where effective_from = (select max(effective_from) from base.fact_carrier_outgoingcarriervoicecost b where minimum_cost >0 and a.carrier_cost_group_id = b.carrier_cost_group_id and a.prefix = b.prefix) and prefix like '"""+str(Country_prefix)+"""%'and carrier_cost_group_id in ("""+str(Carrier_cost_group_id)+""") group by 1,2,3,4,5 having rate > 0"""
+    Input = sql_run(query)
+    Input = reduce_input(Input)
+    output = cpp_del(Input)
+    Deletion_prefix = output[0]
+    cp_rate_prefix = output[1]
+    cp_after_deletion = output[2]
+    Final_rate_Sheet = output[3]
+    Twilio = pd.read_csv('/Users/balram/Desktop/voice-prefix-normalizer/scripts/Input/Results.csv')
+    Twilio = Twilio.drop_duplicates()
+    Twilio['prefix'] = Twilio['Destination Prefixes']
+    Twilio = Twilio.set_index('Destination Prefixes')
+    all_prefix= cp_after_deletion['prefix'].drop_duplicates().astype(int).to_frame()
+    all_prefix = all_prefix.merge(Twilio,how='left',left_on = 'prefix',right_on = 'prefix')
+    already_fill = all_prefix[all_prefix['Price / min'] >0]
+    to_fill = all_prefix['prefix'][all_prefix['Price / min'].isna()].to_frame()
+    for i in range (0,15):
+        intermediate = to_fill.prefix.to_frame()
+        intermediate['dummy_prefix'] =intermediate.prefix//(10**(i+1))
+        intermediate = intermediate.merge(Twilio,how='left',left_on = 'dummy_prefix',right_on = 'prefix')
+        intermediate_fill = intermediate[['prefix_x','ISO','Country','Price / min']][intermediate['Price / min']>0]
+        intermediate_fill.columns = ['prefix','ISO','Country','Price / min']
+        already_fill = pd.concat([intermediate_fill,already_fill],axis=0)
+        to_fill = intermediate['prefix_x'][intermediate['Price / min'].isna()].to_frame()
+        to_fill.columns = ['prefix']
+    already_fill['prefix'] = already_fill['prefix'].astype(int)
+    vars()[country] = already_fill.merge(cp_after_deletion,how='right',left_on = 'prefix',right_on = 'prefix')
+    CTCnsider = ['prefix']
+    CTCnsider_CP = ['prefix', 'ISO', 'Country', 'Price / min']
+    C_Selecion = []
+    C_name = carrier_name.split(',',i+1)
+    for i in range(POD):
+        Test = Carrier_cost_group_id.split(',',i+1)
+        Test = 'Carrier'+str(Test[i])
+        C_Selecion.append(Test)
+        CTCnsider.append(Test)
+        CTCnsider_CP.append(Test)
+    C_Name_Country_Final = ['prefix', 'ISO', 'Country', 'Price / min']+C_name
+    selling_price = vars()[country][CTCnsider]
+    vars()[country]= vars()[country][CTCnsider_CP]
+    vars()[country].columns = C_Name_Country_Final
+    vars()[country].to_csv('/Users/balram/Desktop/voice-prefix-normalizer/processed_data/All_Prices/'+query_input[0]+'Allprice.csv',index=False)
+    cp_after_deletion1=cp_after_deletion[C_Selecion]
+    cp_after_deletion1.columns = C_name
+    selling_price = selling_price.set_index('prefix')
+    selling_price['sell_price'] = selling_price[C_Selecion].apply(second_smallest,axis=1)
+    selling_price = selling_price['sell_price']/(0.5)
+    selling_price = selling_price.to_frame()
+    selling_price['prefix'] = selling_price.index.astype(str)
+    selling_price.index = selling_price.index.map(str)
+    selling_price = selling_price.drop_duplicates()
+    selling_price = selling_price[['prefix','sell_price']]
+    selling_price.columns = ['prefix','rate']
+    vars()[country_routing]= cp_after_deletion1.loc[:, cp_after_deletion.columns != 'prefix']
+    order=np.argsort(-vars()[country_routing].values, axis=1)[:,:POD]
+    vars()[country_routing]= pd.DataFrame(vars()[country_routing].columns[order], columns=['P{}'.format(i) for i in range(POD,0,-1)], index=vars()[country_routing].index)
+    vars()[country_routing] = parent_child_routing_removal(vars()[country_routing])
+    vars()[country_selling_price] =  parent_child_removal(selling_price)
+    vars()[country_selling_price].to_csv('/Users/balram/Desktop/voice-prefix-normalizer/raw_data/'+query_input[0]+'SP.csv',index=False)
+    vars()[country_routing].to_csv('/Users/balram/Desktop/voice-prefix-normalizer/processed_data/Routing/'+query_input[0]+'Routing.csv')
