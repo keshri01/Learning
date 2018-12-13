@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+""" Created on Sat Dec  8 22:33:47 2018 @author: balram """
+import pandas as pd
+import xml.etree.cElementTree as ET
+tree = ET.parse('premium_prefix.xml')
+root = tree.getroot()
+country_iso2= []
+country_code =[]
+possibleLengths = []
+exampleNumber =[]
+nationalNumberPattern = []
+shared_possibleLengths = []
+shared_exampleNumber =[]
+shared_nationalNumberPattern = []
+for territories in root:
+    for territory in territories:
+        country_iso2.append(territory.get('id'))
+        country_code.append(territory.get('countryCode'))
+        premium_rate_test = territory.find('premiumRate')
+        if premium_rate_test is None:
+            possibleLengths.append(0)
+            exampleNumber.append(0)
+            nationalNumberPattern.append(0)
+        else:    
+            for premium_rate in territory.findall('premiumRate'):
+                for possible_length in premium_rate.findall('possibleLengths'):
+                    possibleLengths.append(possible_length.get('national'))
+                exampleNumber.append(premium_rate.find('exampleNumber').text)
+                nationalNumberPattern.append(premium_rate.find('nationalNumberPattern').text)
+        shared_cost_test = territory.find('sharedCost')
+        if shared_cost_test is None:
+            shared_possibleLengths.append(0)
+            shared_exampleNumber.append(0)
+            shared_nationalNumberPattern.append(0)
+        else:    
+            for shared_cost in territory.findall('sharedCost'):
+                for possible_length in premium_rate.findall('possibleLengths'):
+                    shared_possibleLengths.append(possible_length.get('national'))
+                shared_exampleNumber.append(premium_rate.find('exampleNumber').text)
+                shared_nationalNumberPattern.append(premium_rate.find('nationalNumberPattern').text)
+
+premium_prefix = pd.DataFrame({'country_iso2':country_iso2,
+                               'country_code':country_code,
+                               'pre_possibleLengths':possibleLengths,
+                               'pre_exampleNumber':exampleNumber,
+                               'pre_nationalNumberPattern':nationalNumberPattern,
+                               'shared_possibleLengths':shared_possibleLengths,
+                               'shared_exampleNumber':shared_exampleNumber,
+                               'shared_nationalNumberPattern':shared_nationalNumberPattern})
+premium_prefix.to_csv('/Users/balram/Downloads/premium_prefix.csv',index=False)
